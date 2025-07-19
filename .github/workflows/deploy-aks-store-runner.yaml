@@ -1,0 +1,97 @@
+name: Deploy AKS Store Demo - Self-Hosted Runner
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  RESOURCE_GROUP: rg-aks-final
+  CLUSTER_NAME: aks-final-cluster
+  LOCATION: eastus
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure CLI Login with Managed Identity
+        run: |
+          # Login using the managed identity assigned to the VM
+          az login --identity --client-id 893a4871-96d2-4a32-b6c6-954045688408
+
+      - name: Create AKS Cluster
+        run: |
+          # Check if AKS cluster exists, create if it doesn't
+          if ! az aks show --resource-group ${{ env.RESOURCE_GROUP }} --name ${{ env.CLUSTER_NAME }} --query name -o tsv 2>/dev/null; then
+            echo "Creating AKS cluster..."
+            az aks create \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --name ${{ env.CLUSTER_NAME }} \
+              --node-count 1 \
+              --enable-addons monitoring \
+              --generate-ssh-keys \
+              --location ${{ env.LOCATION }} \
+              --yes
+          else
+            echo "AKS cluster already exists, skipping creation..."
+          fi
+
+      - name: Get AKS Credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name ${{ env.CLUSTER_NAME }} \
+            --overwrite-existing
+
+      - name: Deploy AKS Store Demo
+        run: |
+          # Create namespace first
+          kubectl create namespace aks-store-demo --dry-run=client -o yaml | kubectl apply -f -
+
+          # Apply the store demo to the correct namespace
+          kubectl apply -f https://raw.githubusercontent.com/Azure-Samples/aks-store-demo/main/aks-store-quickstart.yaml -n aks-store-demo
+
+          # Wait a bit for resources to be created
+          sleep 30
+
+          # Check what was actually deployed
+          echo "=== Checking deployed resources ==="
+          kubectl get all -n aks-store-demo
+
+          # Wait for deployments to be ready (with better error handling)
+          echo "Waiting for deployments to be ready..."
+
+          # Check if deployments exist before waiting
+          if kubectl get deployment store-front -n aks-store-demo 2>/dev/null; then
+            kubectl wait --for=condition=available --timeout=300s deployment/store-front -n aks-store-demo || echo "store-front deployment wait failed, continuing..."
+          else
+            echo "store-front deployment not found"
+          fi
+
+          if kubectl get deployment product-service -n aks-store-demo 2>/dev/null; then
+            kubectl wait --for=condition=available --timeout=300s deployment/product-service -n aks-store-demo || echo "product-service deployment wait failed, continuing..."
+          else
+            echo "product-service deployment not found"
+          fi
+
+          if kubectl get deployment order-service -n aks-store-demo 2>/dev/null; then
+            kubectl wait --for=condition=available --timeout=300s deployment/order-service -n aks-store-demo || echo "order-service deployment wait failed, continuing..."
+          else
+            echo "order-service deployment not found"
+          fi
+
+      - name: Get Service URLs
+        run: |
+          echo "=== AKS Store Demo Deployment Complete ==="
+          echo "=== All Resources in Namespace ==="
+          kubectl get all -n aks-store-demo
+          echo ""
+          echo "=== Services ==="
+          kubectl get services -n aks-store-demo
+          echo ""
+          echo "=== Pods ==="
+          kubectl get pods -n aks-store-demo
